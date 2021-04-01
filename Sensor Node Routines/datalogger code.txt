@@ -1,0 +1,831 @@
+/*
+  Sensor node Datalogger by Thiago B. Onofre
+
+  Pin:
+
+   SD card attached to SPI bus as follows:
+ ** MOSI - pin 11
+ ** MISO - pin 12
+ ** CLK  - pin 13
+ ** CS   - pin 10
+
+   Date and time functions using a DS1307 RTC connected via I2C and Wire lib
+   SLC - A5 -
+   SDA - A4
+
+  Jan 12th, 2018 - Swtching from arduino Uno to Arduino Mega
+
+  library declaration */
+#include <SPI.h>
+#include <SD.h>
+#include <Wire.h>
+#include "RTClib.h"
+#include <SoftwareSerial.h>
+
+/* I am using the am2315 temperature and relative hum. sensor.
+  This sensor has a digital interface (I2C).
+  This sensor goes in paralel with the RTC
+  For hookup details using this sensor then visit
+  5  http://cactus.io/hookups/sensors/temperature-humidity/am2315/hookup-arduino-to-am2315-temp-humidity-sensor
+  Connect RED of the AM2315 sensor to 5.0V
+  Connect BLACK to Ground
+  Connect WHITE to i2c clock - on 'SCL' 21 Arduino MEGA
+  Connect YELLOW to i2c data - on 'SDA' 20 Arduino MEGA
+*/
+//#include <Wire.h>
+#include <Adafruit_AM2315.h>
+Adafruit_AM2315 am2315;
+
+/*As I am using the adafruit temp/rel sensor from Adafruit, it is required to
+  add the following license: */
+/***************************************************
+  This is an example for the AM2315 Humidity + Temp sensor
+
+  Designed specifically to work with the Adafruit BMP085 Breakout
+  ----> https://www.adafruit.com/products/1293
+
+  These displays use I2C to communicate, 2 pins are required to
+  interface
+  Adafruit invests time and resources providing this open source code,
+  please support Adafruit and open-source hardware by purchasing
+  products from Adafruit!
+
+  Written by Limor Fried/Ladyada for Adafruit Industries.
+  BSD license, all text above must be included in any redistribution
+ ****************************************************/
+// global variables
+//sd card variables
+const int chipSelect = 53;
+File dataFile;
+
+// rtc variables
+RTC_DS1307 rtc;
+
+
+//GPS configuration
+// Constants
+#define rxPin 9      //rx pin in gps connection
+#define txPin 8      //tx pin in gps connection
+
+// set up the serial port
+
+SoftwareSerial gps = SoftwareSerial(rxPin, txPin);
+
+// Variables
+byte byteGPS = 0;
+int i = 0;
+int state = 0;
+char dataGPG[100] = "";
+char *pch;
+char *GGA[15];
+int sat = 0;
+
+
+// part of the code is from   http://www.arduino.cc/en/Tutorial/BlinkWithoutDelay
+// Generally, you should use "unsigned long" for variables that hold time
+// The value will quickly become too large for an int to store
+unsigned long previousMillis = 0;        // will store last time task was updated
+// constants won't change:
+const long interval = 1000;           // interval at which to blink (milliseconds)
+unsigned char previousHour , currentHour, previousMin , currentMin;   // will store last time minute
+
+//debug variables
+#define DEBUG_ON 1
+#define DEBUG_OFF 0
+char _DEBUG;
+// constants won't change. Used here to set a pin number:
+const int ledPin =  8;// the number of the LED pin
+// Variables will change:
+int ledState = LOW;
+
+#define SAMPLE_TIME 15
+
+//Function Prototypes
+void SerialInit();
+void SDCardInit();
+void RTCInit();
+void GPSInit();
+void Temp_Rel_Sensor_Init();
+void datalog_printHeader();
+void datalog(String dataString);
+void printRTC(char var);
+
+
+
+//SENSORS
+// TEMPERATURE VARIABLES
+float tempPrevious;
+float tempCurrent;
+float tempAverage;
+
+// RELATIVE HUMIDITY VARIABLES
+float rhPrevious;
+float rhCurrent;
+float rhAverage;
+
+// RAIN FALL SENSOR
+const byte RAIN = 2;
+
+float rain15Min; // [rain inches over the past 15min)] -- the accumulated rainfall in the past 15 min
+volatile float dailyrainin; // [rain inches so far today in local time]
+
+// volatiles are subject to modification by IRQs
+volatile unsigned long raintime, rainlast, raininterval, rain;
+
+
+//Interrupt routines (these are called by the hardware interrupts, not by the main code)
+//-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+void rainIRQ()
+// Count rain gauge bucket tips as they occur
+// Activated by the magnet and reed switch in the rain gauge, attached to input D2
+{
+  raintime = millis(); // grab current time
+  raininterval = raintime - rainlast; // calculate interval between this and last event
+
+  if (raininterval > 10) // ignore switch-bounce glitches less than 10mS after initial edge
+  {
+    dailyrainin += 0.011; //Each dump is 0.011" of water
+    rain15Min   += 0.011; //Increase this minute's amount of rain
+
+    rainlast = raintime; // set up for next event
+  }
+}
+
+// initialization routine
+void setup() {
+  _DEBUG = DEBUG_ON;
+  SerialInit();
+  SDCardInit();
+  SD_createFile("datalog.txt");
+  SD_createFile("info.txt");
+  SD_createFile("gps.txt");
+  datalog_printHeader();
+  RTCInit();
+  //GPSInit();
+
+
+
+  //rain gauge sensor initialization
+  pinMode(RAIN, INPUT_PULLUP); // input from rain gauge sensor
+  // attach external interrupt pins to IRQ functions
+  attachInterrupt(0, rainIRQ, FALLING);
+  // turn on interrupts
+  interrupts();
+
+  Temp_Rel_Sensor_Init();
+
+
+  //  DateTime now = rtc.now();
+  //  currentMin = now.minute();
+  //  previousMin = currentMin ;
+
+  // calendar global variables
+  previousMin  = 99;
+  currentMin   = 99;
+  previousHour = 99;
+  currentHour  = 99;
+
+  tempPrevious  = 255;
+  rhPrevious = 255;
+  pinMode(ledPin, OUTPUT);
+
+}
+
+void loop() {
+
+  while (1) {
+
+    // check to see if it's time to execute your periodic function;
+    // it checks the the difference between the current time and
+    // last time you executed your task is bigger than
+    // the interval at which you want to execute your task.
+    unsigned long currentMillis = millis();
+    if (currentMillis - previousMillis >= interval) {
+      // save the last time you executed your task
+      previousMillis = currentMillis;
+      // if the LED is off turn it on and vice-versa:
+      if (ledState == LOW) {
+        ledState = HIGH;
+      } else {
+        ledState = LOW;
+      }
+      // set the LED with the ledState of the variable:
+      digitalWrite(ledPin, ledState);
+
+      //read rtc and update minutes.
+      DateTime now = rtc.now();
+
+      //printRTC('t'); // prints hh:mm:ss
+
+      currentMin = now.minute();
+
+      /*we need to execute things @1min, for example
+         read sensors, calculate stuff... so, we need to
+         check if previous minute is  different from current minute
+         if that is true, that means, we are in a "new" minute, therefore
+         we have to execute the minute related tasks*/
+      if ( previousMin != currentMin) {
+        previousMin = currentMin; // making previous equals to current helps us to execute tasks only once per minute
+
+        //printRTC('m');
+        // read sensors
+
+        //Read TEMPERATURE probe
+        tempCurrent = am2315.readTemperature();
+        // for the first reading, make previous equals to current.
+        if ( tempPrevious  == 255) {
+          tempPrevious = tempCurrent ;
+        }
+        // average the value; this is the value that will be logged
+        tempAverage = (tempPrevious + tempCurrent) / 2;
+
+        // makes previous temp equals to current for the next reading cicle.
+        tempPrevious = tempCurrent ;
+
+
+        //read the RELATIVE HUMIDITY probe
+        rhCurrent = am2315.readHumidity();
+
+        // for the first reading, make previous equals to current.
+        if ( rhPrevious  == 255) {
+          rhPrevious = rhCurrent ;
+        }
+
+        // average the value; this is the value that will be logged
+        rhAverage = (rhPrevious + rhCurrent) / 2;
+
+        // makes previous value equals to current for the next reading cicle.
+        rhPrevious = rhCurrent ;
+
+
+        //           if(_DEBUG){
+        //               Serial.println(tempCurrent, 2);
+        //              Serial.println(tempPrevious, DEC);
+        //              Serial.println(tempAverage, DEC);
+        //              Serial.println(rhCurrent, DEC);
+        //              Serial.println(rhPrevious, DEC);
+        //              Serial.println(rhAverage, DEC);
+        //           }
+
+        /* if the rest of the division of currentMinute by sample_time (15 min) is zero
+          than, we have to average the data, log the data in the sd card and transmit the data.
+          maybe a state machine?d
+        */
+        // logging every 5 minutes
+        if (currentMin % SAMPLE_TIME == 0) {
+          Serial.println("sample time!");
+
+          // make a string for assembling the data to log:
+          String dataString = "";
+          dataString += String(tempAverage);
+          dataString += ",";
+          dataString += String(rhAverage);
+          dataString += ",";
+          dataString += String(rain15Min);
+          dataString += ",";
+
+          Serial.print("datalog string: ");
+          printRTC('a');
+
+          Serial.println(dataString);
+          datalog("datalog.txt", dataString);
+          // reset rainfall
+          rain15Min = 0;
+
+        }
+
+        /* 30 minutes tasks*/
+        if (currentMin % 30 == 0) {
+          Serial.println("30 min mark!");
+
+
+        }
+
+        /* Every "new" minute, we have to check if it is a "new hour"*/
+        currentHour = now.hour();
+        /* Here will be executed the Houly tasks and perhaps a daily reset*/
+        if ( previousHour != currentHour) {
+
+          // read the gps once every day at 12 pm
+          // midnight reset and new day happens at 00:00 hours
+
+          //Midnight reset if hour is 23:59
+          if (currentHour % 23 == 0) {
+            if (currentMin == 59) {
+
+            }
+          }
+
+          //Midnight daily summary?
+          // total rain fall
+          // max min temperature
+          //
+          previousHour = currentHour;
+          //printRTC('h');
+        }
+
+      }
+    }
+  }
+}
+
+/*
+  input: the name of the file and the data
+  possible names: datalog.txt and data
+  info.txt data
+  gps.txt gpsdata
+*/
+void datalog(String FileNameString, String dataString) {
+
+  // open the file. note that only one file can be open at a time,
+  // so you have to close this one before opening another.
+  dataFile = SD.open(FileNameString, FILE_WRITE);
+  DateTime now = rtc.now();
+  // if the file is available, write to it:
+  if (dataFile) {
+    dataFile.print(now.year(), DEC);
+    dataFile.print('/');
+    dataFile.print(now.month(), DEC);
+    dataFile.print('/');
+    dataFile.print(now.day(), DEC);
+    dataFile.print(',');
+    dataFile.print(now.hour(), DEC);
+    dataFile.print(':');
+    dataFile.print(now.minute(), DEC);
+    dataFile.print(',');
+
+    dataFile.println(dataString);
+    dataFile.close();
+    // print to the serial port too:
+    //Serial.println(dataString);
+  }
+  // if the file isn't open, pop up an error:
+  else {
+    Serial.println("error opening datalog.txt");
+  }
+}
+
+void datalog_printHeader(void) {
+
+  // open the file. note that only one file can be open at a time,
+  // so you have to close this one before opening another.
+  dataFile = SD.open("datalog.txt", FILE_WRITE);
+
+  dataFile.println("YY/MM/DD,hh:mm,TEMP(C_deg),RH(%),");
+
+  dataFile.close();
+  // print to the serial port too:
+  //Serial.println(dataString);
+
+}
+
+
+/*print rtc uses a case to return different options of time/calendar:
+   see menu:
+  a -> all
+  h-> hour
+  m-> minute
+  s-> second
+  M-> month
+  D-> day
+  Y -> year
+  C -> calendar YY MM DD
+  t -> time hh mm ss
+*/
+void printRTC(char var) {
+  DateTime now = rtc.now();
+
+  switch (var) {
+    case 'a':
+      Serial.print(now.year(), DEC);
+      Serial.print('/');
+      Serial.print(now.month(), DEC);
+      Serial.print('/');
+      Serial.print(now.day(), DEC);
+      Serial.print(',');
+
+      /* Serial.print(" (");
+        Serial.print(daysOfTheWeek[now.dayOfTheWeek()]);
+        Serial.print(") ");
+      */
+      Serial.print(now.hour(), DEC);
+      Serial.print(':');
+      Serial.print(now.minute(), DEC);
+      Serial.print(':');
+      Serial.print(now.second(), DEC);
+      Serial.println();
+      break;
+    case 'D':
+      Serial.println(now.day(), DEC);
+      break;
+    //      case 'W':
+    //              Serial.print(" (");
+    //              Serial.print(daysOfTheWeek[now.dayOfTheWeek()]);
+    //              Serial.println(") ");
+    //        break;
+    case 'M':
+      Serial.println(now.month(), DEC);
+      break;
+    case 'Y':
+      Serial.println(now.year(), DEC);
+      break;
+    case 'c':
+
+      Serial.print(now.year(), DEC);
+      Serial.print('/');
+      Serial.print(now.month(), DEC);
+      Serial.print('/');
+      Serial.print(now.day(), DEC);
+      Serial.println(',');
+
+      break;
+    case 'h':
+      Serial.println(now.hour(), DEC);
+      break;
+    case 'm':
+      Serial.println(now.minute(), DEC);
+      break;
+    case 's':
+      Serial.println(now.second(), DEC);
+      break;
+    case 't':
+      Serial.print(now.hour(), DEC);
+      Serial.print(':');
+      Serial.print(now.minute(), DEC);
+      Serial.print(':');
+      Serial.print(now.second(), DEC);
+      Serial.println();
+      break;
+    default:
+      Serial.print(now.year(), DEC);
+      Serial.print('/');
+      Serial.print(now.month(), DEC);
+      Serial.print('/');
+      Serial.print(now.day(), DEC);
+      Serial.print(',');
+      Serial.print(now.hour(), DEC);
+      Serial.print(':');
+      Serial.print(now.minute(), DEC);
+      Serial.print(':');
+      Serial.print(now.second(), DEC);
+      Serial.println();
+  }
+}
+void SerialInit(void) {
+
+  // Open serial with the computer
+
+  Serial.begin(9600);
+  while (!Serial) {
+    ; // wait for serial port to connect. Needed for native USB port only
+  }
+
+  if (_DEBUG) {
+    Serial.println("Serial Initialized - 9600bps.");
+  }
+}
+
+void SDCardInit() {
+
+  // SD card initialization
+  if (_DEBUG) {
+    Serial.println("Initializing SD card.");
+  }
+
+  // see if the card is present and can be initialized:
+  if (!SD.begin(chipSelect)) {
+    if (_DEBUG) {
+      Serial.println("Card failed, or not present");
+    }
+
+    // don't do anything more:
+    return;
+  }
+  if (_DEBUG) {
+    Serial.println("card initialized.");
+  }
+}
+
+/* create file allows the user to create multiple files by calling:
+   for example: SD_createFile("datalog.txt");
+   Onofre,TB Jan 20th 2018
+*/
+void SD_createFile(String FileName_txt) {
+
+  // open a new file and immediately close it:
+  // Check to see if the file exists:
+  if (SD.exists(FileName_txt)) {
+    // Serial.println("datalog.txt exists.");
+  }
+  else
+  {
+    //  Serial.println("datalog.txt doesn't exist.");
+    if (_DEBUG) {
+      Serial.print("Creating file: ");
+      Serial.println(FileName_txt);
+    }
+    dataFile = SD.open(FileName_txt, FILE_WRITE);
+    dataFile.close();
+  }
+}
+
+void RTCInit() {
+
+  // RTC initialization
+  if (_DEBUG) {
+    Serial.println("Initializing RTC.");
+  }
+
+  if (! rtc.begin()) {
+    if (_DEBUG) {
+      Serial.println("Couldn't find RTC");
+    }
+    while (1);
+  }
+
+  if (! rtc.isrunning()) {
+    if (_DEBUG) {
+      Serial.println("RTC is NOT running!");
+    }
+
+    // following line sets the RTC to the date & time this sketch was compiled
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    // This line sets the RTC with an explicit date & time, for example to set
+    // January 21, 2014 at 3am you would call:
+    // rtc.adjust(DateTime(2014, 1, 21, 3, 0, 0));
+  }
+
+  if (_DEBUG) {
+    Serial.println("RTC initialized. Current time: ");
+    printRTC('a');
+  }
+}
+
+
+void GPSInit() {
+  if (_DEBUG) {
+    Serial.println("Initializing GPS Serial Port.");
+  }
+  //setup for GPS Serial Port
+  pinMode(rxPin, INPUT);
+  pinMode(txPin, OUTPUT);
+
+  gps.begin(9600);
+  gps.flush();
+
+  if (_DEBUG) {
+    Serial.println("GPS Initialized - 9600bps - pins 9(rx), 8(tx).");
+  }
+
+  // ------ End gps serial port configuration -----
+}
+
+
+/*
+  This function will allow us to identify the data we need to get the longitude, latitude ...
+*/
+
+void string()
+{
+  i = 0;
+  memset(GGA, 0, sizeof(GGA));          // Remove previous readings
+
+  pch = strtok (dataGPG, ",");
+
+  // Analyze the saved interval in pch to see if it the needed string
+  if (strcmp(pch, "$GPGGA") == 0)
+  {
+    while (pch != NULL)
+    {
+      pch = strtok (NULL, ",");
+      GGA[i] = pch;
+      i++;
+    }
+
+    plot(GGA, "$GPGGA");        // Call to the function that is going to display the data
+  }
+}
+
+/*
+  This function organize the gps data received for printing in the serial monitor.
+*/
+
+void plot(char **GGAPrint, char *trama)
+{
+  state = atoi(GGAPrint[5]);
+  sat = atoi(GGAPrint[6]);
+
+  if (trama == "$GPGGA" && state == 1)
+  {
+    digitalWrite(13, HIGH);            // Then there are satellites, the LED switch ON
+
+    Serial.println("");
+    Serial.println("----------------------------------------------");
+    Serial.print("UTC Hour -> ");
+    Serial.println(GGAPrint[0]);
+    Serial.print("Latitude -> ");
+    Serial.print(GGAPrint[1]);
+    Serial.println(GGAPrint[2]);
+    Serial.print("Longitude -> ");
+    Serial.print(GGAPrint[3]);
+    Serial.println(GGAPrint[4]);
+    Serial.print("GPS quality: 0=null; 1=GPS fixed -> ");
+    Serial.println(GGAPrint[5]);
+    Serial.print("Number of satellites -> ");
+    Serial.println(sat);
+    Serial.print("Horizontal Dilution of Precision -> ");
+    Serial.println(GGAPrint[7]);
+    Serial.print("Antenna altitude -> ");
+    Serial.print(GGAPrint[8]);
+    Serial.println(GGAPrint[9]);
+    Serial.print("Geoid Separation -> ");
+    Serial.print(GGAPrint[10]);
+    Serial.println(GGAPrint[11]);
+    Serial.println("----------------------------------------------");
+    Serial.println("");
+
+  }
+
+  else                                // If no satellite connection
+  {
+    digitalWrite(13, LOW);                                              // Turn off the LED
+    Serial.println("");
+    Serial.println("-----------------------------");
+    Serial.print("|--- Satellites Used -->");
+    Serial.print(sat);
+    Serial.println(" |");
+    Serial.println("|----Waiting location----|");
+    Serial.println("-----------------------------");
+    Serial.println("");
+  }
+}
+
+
+//
+void GPS_readRadio(void) {
+
+  gps.flush();
+  Serial.flush();
+
+  Serial.println("Waiting GPS data...");
+
+  // Prepare all for reading GPS Serial Port
+  memset(dataGPG, 0, sizeof(dataGPG));    // Remove previous readings
+  byteGPS = 0;                            // Remove data
+  byteGPS = gps.read();                   // Read the byte that is in the GPS serial port
+  delay(1000);
+  // Find the desired string
+  while (byteGPS != '$')
+  {
+    byteGPS = gps.read();
+  }
+
+  // Save the string in an array
+  i = 1;
+  dataGPG[0] = '$';
+
+  while (byteGPS != '*' )
+  {
+    byteGPS = gps.read();
+    dataGPG[i] = byteGPS;
+    i++;
+  }
+
+  dataGPG[i] = '\0';
+  string();                                 // Call to the function that manipulates our string
+
+}
+/*
+  This function will allow us to identify the data we need to get the longitude, latitude ...
+*/
+void GPS_decodeString()
+{
+  i = 0;
+  memset(GGA, 0, sizeof(GGA));          // Remove previous readings
+
+  pch = strtok (dataGPG, ",");
+
+  // Analyze the saved interval in pch to see if it the needed string
+  if (strcmp(pch, "$GPGGA") == 0)
+  {
+    while (pch != NULL)
+    {
+      pch = strtok (NULL, ",");
+      GGA[i] = pch;
+      i++;
+    }
+
+    //    GPS_ReturnString(GGA, "$GPGGA");        // Call to the function that is going to display the data
+  }
+}
+
+
+
+/*print rtc uses a case to return different options of time/calendar:
+  (onofre, TB. Jan 20th,2018)
+  see menu:
+  H -> utc hour
+  L -> latitude
+  O -> longitude
+  Q -> gps qulity
+  N -> number of sat.
+  P -> horiz. dilut. of precision
+  T -> antenna altitude
+  G -> geoid sparation.
+
+*/
+void GPS_ReturnString(char var) {
+
+  //
+  //  char **GGAPrint, char *trama)
+  //}
+
+  state = atoi(GGA[5]);
+  sat = atoi(GGA[6]);
+
+  //if (trama == "$GPGGA" && state == 1)
+  if (state == 1)
+  {
+    switch (var) {
+      case 'H': // return UTC hour
+        Serial.print("UTC Hour -> ");
+        Serial.println(GGA[0]);
+        break;
+      case 'L':  // return latitude
+        Serial.print("Latitude -> ");
+        Serial.print(GGA[1]);
+
+        Serial.println(GGA[2]);
+
+        break;
+      case 'O':  // return longitude
+        Serial.print("Longitude -> ");
+        Serial.print(GGA[3]);
+        Serial.println(GGA[4]);
+
+        break;
+
+      case 'Q':  // return quality of signal
+        Serial.print("GPS quality: 0=null; 1=GPS fixed -> ");
+        Serial.println(GGA[5]);
+
+        break;
+
+      case 'N':  // return number of satelites
+        Serial.print("Number of satellites -> ");
+        Serial.println(sat);
+
+        break;
+
+      case 'P':  // return Horizontal Dilution of Precision
+        Serial.print("Horizontal Dilution of Precision -> ");
+        Serial.println(GGA[7]);
+      case 'T':  // return Antenna altitude
+        Serial.print("Antenna altitude -> ");
+        Serial.print(GGA[8]);
+        Serial.println(GGA[9]);
+
+
+        break;
+
+      case 'G':  // return Geoid Separation
+        Serial.print(GGA[10]);
+        Serial.println(GGA[11]);
+        break;
+
+      default:
+        Serial.println();
+    }
+
+  }
+
+  else                                // If no satellite connection
+  {
+    digitalWrite(13, LOW);                                              // Turn off the LED
+    Serial.println("");
+    Serial.println("-----------------------------");
+    Serial.print("|--- Satellites Used -->");
+    Serial.print(sat);
+    Serial.println(" |");
+    Serial.println("|----Waiting location----|");
+    Serial.println("-----------------------------");
+    Serial.println("");
+  }
+
+}
+
+
+void Temp_Rel_Sensor_Init() {
+  if (! am2315.begin()) {
+    if (_DEBUG) {
+      Serial.println("Sensor not found, check wiring & pullups!");
+    }
+  }
+
+  if (_DEBUG) {
+    Serial.println("Sensor Initialized");
+    Serial.print("Hum: "); Serial.println(am2315.readHumidity());
+    Serial.print("Temp: "); Serial.println(am2315.readTemperature());
+  }
+
+}

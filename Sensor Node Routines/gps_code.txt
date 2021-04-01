@@ -1,0 +1,249 @@
+// receives data from serial2
+// finds the start delimiter
+// receives and stores data until it finds any of the end delimiter: * 0x0D 0x0A 
+// when receiving data, it checks for 0XFF, which is just trash... 
+// also checks for possible new messages delimiter '$', we dont want to store them. 
+// adds data into a buffer, simply an array.
+// it checks for possible overflows. There is a variable counting the number of incoaming char
+// if the number is greater than 99, it stops storing data. 
+// finally, prints the string and the number of received characters in the serial. 
+// while I am receiving the message, I dded a  comma counter. 
+//  I am storing the position of the comma in a separated array named gpsCommaPosition. 
+//   As NMEA as fixed positions for its API, knowing the comma position will make it easier for find the fields. 
+// 
+// next step is to save lat long in an array and add this to the datalogger code. 
+// is to decode the received message. 
+
+   int inCharCount =0, inCharCountComma = 0;
+   char gpsInString[300]; // I still need to check how many bytes the gps radio will dump into the serial port
+   char gpsLogString[100]; // 
+   int gpsCommaPosition[50];
+   char t_out_gps = 30;
+   int GPSHwSwitch = 8;
+   char gps_newMessage = 0;
+   char gps_on = 0; 
+   char latitude[10];
+   char longitude[10];
+   char lat_long = 0;
+    
+   char comandoGPR[7] = "GPRMC";
+int i;
+void setup() {
+  // put your setup code here, to run once:
+
+Serial.begin(9600);
+GPS_Initialize();
+  GPS_read();
+}
+
+void loop() {
+
+
+  delay(1000);
+  // put your main code here, to run repeatedly:
+
+}
+
+
+void GPS_Initialize(void){
+  
+  Serial2.begin(9600);
+  pinMode(GPSHwSwitch, OUTPUT);       // Initialize gps software switch
+}
+
+void GPS_PowerON(void){
+  if(gps_on == 0){
+    Serial.println("Starting GPS Radio ...");                                                                  
+
+    digitalWrite(GPSHwSwitch, HIGH);
+    delay(45000);
+    Serial.println("radio On");                                                                  
+
+
+    gps_on = 1;
+  }
+}
+
+void GPS_PowerOFF(void){
+ if(gps_on == 1){
+        Serial.println("radio Off");                                                                  
+
+    digitalWrite(GPSHwSwitch, LOW);
+    delay(100);
+    gps_on = 0;
+  }
+}
+
+
+void GPS_read(void){
+
+  if( gps_on == 0){
+    GPS_PowerON();
+  }
+  
+  while(lat_long==0){
+      Serial.println("waiting for latlong");                                                                  
+
+        while(Serial2.available()>0){
+        unsigned char inchar; //needs to be unsiged to receive all 255 characters.
+        inchar = Serial2.read();
+        if(inchar=='$'){
+          inchar = Serial2.read();
+          if(inchar!= 255){
+              while((inchar!='*')&&(inchar!=0x0D)&&(inchar!=0x0A)&&(inchar!='$')){
+                
+                 // store only if the data is not 0XFF, new message, and the buffer is not full (99 chars) 
+                 if((inchar!= 255)&&(inchar!='$')&&(inCharCount<=99)){ //check if it is valid data
+                    if(inchar == ','){
+                      gpsCommaPosition[inCharCountComma] = inCharCount;
+                      inCharCountComma++;
+                    }
+                    gpsInString[inCharCount] = inchar;
+                    inCharCount++;
+                  //  Serial.write(inchar);
+                 }
+                 inchar = Serial2.read();
+              }
+             gpsInString[inCharCount] = 0;
+             gpsCommaPosition[inCharCountComma++] = 999;
+             gps_newMessage = 1;// signs the new message
+            }
+         }
+      }
+    
+    
+      //  Serial.println(gpsInString);                                                                  
+      
+         if(gps_newMessage == 1){
+              inCharCountComma = 0;
+              gps_newMessage = 0;
+             // Serial.println(inCharCount);
+              inCharCount = 0;
+              if(gpsInString[0] == 'G'){
+                  if(gpsInString[1] == 'P'){
+                     if(gpsInString[2] == 'R'){
+                        if(gpsInString[3] == 'M'){
+                           if(gpsInString[4] == 'C'){
+    
+    //                            Serial.println("GPRMC >>");
+    //                            Serial.println( gpsInString);
+    //                            Serial.print ("time utc: ");
+    //                            for (i = (gpsCommaPosition[0]+1); i<= (gpsCommaPosition[1]-1); i++){
+    //                                Serial.print(gpsInString[i]);
+    //                                 
+    //                            }
+    //                           // Serial.println(" ");
+                                
+                             //   Serial.print ("status: ");
+                                for (i = (gpsCommaPosition[1]+1); i<= (gpsCommaPosition[2]-1); i++){
+                                  if(gpsInString[i]=='A'){
+                                    // valid message arrived
+                                    // 
+                                    //  digitalWrite(GPSHwSwitch, LOW); // turn off the gps radio
+                                   //   Serial.println(" ");
+                                        GPS_PowerOFF();
+                                        lat_long = 1;
+                                       for (i = (gpsCommaPosition[2]+1); i<= (gpsCommaPosition[6]-1); i++){
+                                            Serial.print(gpsInString[i]); // prints: lat,N/S,long, W/E
+                                        }
+    //                                     
+    //                                    Serial.print ("Latitude: ");
+    //                                    for (i = (gpsCommaPosition[2]+1); i<= (gpsCommaPosition[3]-1); i++){
+    //                                        Serial.print(gpsInString[i]);
+    //          
+    //                                    }
+    //                                    
+    //                                    Serial.println(" ");
+    //                                    Serial.print ("N/S: ");
+    //                                    for (i = (gpsCommaPosition[3]+1); i<= (gpsCommaPosition[4]-1); i++){
+    //                                        Serial.print(gpsInString[i]);
+    //                                         
+    //                                    }            
+    //                                                   
+    //                                    Serial.println(" ");
+    //                                    Serial.print ("longitude: ");
+    //                                    for (i = (gpsCommaPosition[4]+1); i<= (gpsCommaPosition[5]-1); i++){
+    //                                        Serial.print(gpsInString[i]);
+    //                                         
+    //                                    }                           
+    //        
+    //                                    Serial.println(" ");
+    //                                    Serial.print ("e/w: ");
+    //                                    for (i = (gpsCommaPosition[5]+1); i<= (gpsCommaPosition[6]-1); i++){
+    //                                        Serial.print(gpsInString[i]);
+    //                                         
+    //                                    }    
+    //        //                           Serial.print ("COMMA >>");
+    //        //
+    //        //                            i=0;
+    //        //                            while(gpsCommaPosition[i]!=999){
+    //        //                               Serial.print(gpsCommaPosition[i++],DEC); 
+    //        //                               Serial.print(";");
+    //        //                            }
+                                        Serial.println(" ");
+                                            
+                                  }
+                               }
+                           }
+                        }
+                      }else
+                      if(gpsInString[2] == 'G'){ 
+                          if(gpsInString[3] == 'G'){
+                             if(gpsInString[4] == 'A'){
+                                  //  digitalWrite(GPSHwSwitch, LOW); 
+    
+                                // Serial.println("GPGGA >>");
+                                // Serial.println( gpsInString);
+    //
+    //                           
+    //                             Serial.print ("COMMA >>");
+    //                            i=0;
+    //                            while(gpsCommaPosition[i]!=999){
+    //                               Serial.print(gpsCommaPosition[i++],DEC); 
+    //                               Serial.print(";");
+    //                            }
+    //                            Serial.println(" ");            
+                              }
+                           }else
+                           if(gpsInString[3] == 'S'){
+                             if(gpsInString[4] == 'A'){
+                                // digitalWrite(GPSHwSwitch, LOW); 
+    
+    //                            Serial.println("GPGSA >>");
+    //                            Serial.println( gpsInString);  
+    //                             Serial.print ("COMMA >>");
+    //                            i=0;
+    //                            while(gpsCommaPosition[i]!=999){
+    //                               Serial.print(gpsCommaPosition[i++],DEC); 
+    //                               Serial.print(";");
+    //                            }
+    //                            Serial.println(" ");                 
+                             }else
+                             if(gpsInString[4] == 'V'){
+                            //digitalWrite(GPSHwSwitch, LOW); 
+    
+    //                            Serial.println("GPGSV >>");
+    //                            Serial.println( gpsInString);
+    ////                             Serial.print ("COMMA >>");
+    //                            i=0;
+    //                            while(gpsCommaPosition[i]!=999){
+    //                               Serial.print(gpsCommaPosition[i++],DEC); 
+    //                               Serial.print(";");
+    //                            }
+    //                            Serial.println(" ");
+                             }
+                          }              
+                       }  
+                  }
+              }
+     // 
+         }
+             // Serial.println(" total chars received");
+          //     inCharCount = 0;
+     // Serial.println("***---***");
+    //  digitalWrite(GPSHwSwitch, LOW); 
+            delay(1000);
+
+      }
+  
+}
